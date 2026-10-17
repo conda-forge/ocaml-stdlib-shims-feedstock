@@ -1,5 +1,10 @@
 context:
   version: "0.3.0"
+  build_number: 1
+
+  # ocaml_win-64 ships gcc_* and vs2022_* at the same version/build; name the track.
+  c_toolchain: ${{ "" if unix else c_compiler ~ "_*" }}
+  library: ${{ "Library/" if not unix else "" }}
 
 package:
   name: ocaml-stdlib-shims
@@ -10,27 +15,66 @@ source:
   sha256: babf72d3917b86f707885f0c5528e36c63fccb698f4b46cf2bab5c7ccdd6d84a
 
 build:
-  number: 0
-  skip:
-    - win
+  number: ${{ build_number }}
+  string: ${{ c_compiler ~ "_" if not unix }}h${{ hash }}_${{ build_number }}
   script:
-    - dune build --profile=release -p stdlib-shims @install
-    - dune install --prefix="${PREFIX}" --libdir="${PREFIX}/lib/ocaml" stdlib-shims
+    - if: unix
+      then:
+        - dune build --profile=release -p stdlib-shims @install
+        - dune install --prefix="${PREFIX}" --libdir="${PREFIX}/lib/ocaml" stdlib-shims
+      else:
+        # Plain cmd.exe, not MSYS2 bash: pure OCaml, no stubs, so no wrapper is
+        # needed and the backslashed install prefix reaches dune intact. The
+        # dune cache trips over mixed path separators on windows.
+        - dune build --cache=disabled --profile=release -p stdlib-shims @install
+        - if errorlevel 1 exit 1
+        - dune install --prefix="%LIBRARY_PREFIX%" --libdir="%LIBRARY_PREFIX%\lib\ocaml" stdlib-shims
+        - if errorlevel 1 exit 1
 
 requirements:
   build:
-    - ${{ stdlib("c") }}
     - ${{ compiler("ocaml") }}
+    - if: not unix and c_compiler == "gcc"
+      then:
+        - ${{ stdlib("m2w64_c") }}
+      else:
+        - ${{ stdlib("c") }}
+    # ocaml_win-64 >=14 only run-constrains the C compiler; activate it here, once (vs2022, zig)
+    - if: not unix and c_compiler != "gcc"
+      then:
+        - ${{ compiler("c") }}
+    # compiler("ocaml") renders no toolchain track; name it on windows
+    - if: not unix
+      then:
+        - ocaml_${{ target_platform }} ${{ ocaml_compiler_version }}.* ${{ c_toolchain }}
+    # the cross compiler does not pull the native one; the build runs OCaml on the build machine
+    - if: build_platform != target_platform and unix
+      then:
+        - ocaml_${{ build_platform }} ${{ ocaml_compiler_version }}.*
+    # windows cross: the self-contained gcc track needs no vcvars
+    - if: build_platform != target_platform and not unix
+      then:
+        - ocaml_${{ build_platform }} ${{ ocaml_compiler_version }}.* gcc_*
     - ocaml-dune >=1.0
   host:
-    - ocaml >=4.02.3
+    # library: ocaml's run_export pins the compiler patch version
+    - ocaml ${{ ocaml_compiler_version }}.*
+    # the noarch ocaml metapackage does not pin the windows toolchain track
+    - if: not unix
+      then:
+        - ocaml_${{ target_platform }} ${{ ocaml_compiler_version }}.* ${{ c_toolchain }}
+  # the ocaml run_export does not encode the windows toolchain track
+  run_constraints:
+    - if: not unix
+      then:
+        - ocaml_${{ target_platform }} ${{ ocaml_compiler_version }}.* ${{ c_toolchain }}
 
 tests:
   - package_contents:
       strict: true
       files:
-        - lib/ocaml/stdlib-shims/*
-        - doc/stdlib-shims/*
+        - ${{ library }}lib/ocaml/stdlib-shims/*
+        - ${{ library }}doc/stdlib-shims/*
 
 about:
   homepage: https://github.com/ocaml/stdlib-shims
